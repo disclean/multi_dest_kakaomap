@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>목적지 지도 · 즐겨찾기</title>
+<title>목적지 지도</title>
 <style>
   :root {
     --bg: #f3f5f4;
@@ -57,39 +57,8 @@
     border-bottom: 1px solid var(--line);
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    gap: 8px;
   }
-  .toggle-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    font-size: 13.5px;
-  }
-  .switch {
-    position: relative;
-    width: 38px;
-    height: 22px;
-    display: inline-block;
-  }
-  .switch input { opacity: 0; width: 0; height: 0; }
-  .slider {
-    position: absolute; cursor: pointer;
-    top: 0; left: 0; right: 0; bottom: 0;
-    background: #c8d1ce;
-    border-radius: 22px;
-    transition: 0.15s;
-  }
-  .slider:before {
-    position: absolute; content: "";
-    height: 16px; width: 16px;
-    left: 3px; bottom: 3px;
-    background: white;
-    border-radius: 50%;
-    transition: 0.15s;
-  }
-  .switch input:checked + .slider { background: var(--accent); }
-  .switch input:checked + .slider:before { transform: translateX(16px); }
-
   .file-row { display: flex; gap: 8px; }
   button {
     font-family: inherit;
@@ -133,14 +102,14 @@
   }
   .item:hover { background: var(--accent-soft); }
   .item.active { background: var(--accent-soft); }
-  .item .star {
-    font-size: 18px;
-    line-height: 1.3;
-    color: #c8d1ce;
-    user-select: none;
+  .item input[type="checkbox"] {
+    margin-top: 3px;
     flex-shrink: 0;
+    width: 15px;
+    height: 15px;
+    accent-color: var(--accent);
+    cursor: pointer;
   }
-  .item .star.on { color: #e0a83a; }
   .item .text { flex: 1; min-width: 0; }
   .item .name {
     font-size: 14px;
@@ -212,7 +181,6 @@
   .banner .icon { font-size: 15px; margin-top: 1px; }
   .banner .body { flex: 1; }
   .banner .title { font-weight: 700; margin-bottom: 2px; }
-  .banner ul { margin: 6px 0 0; padding-left: 18px; }
   .banner .close {
     background: transparent;
     border: none;
@@ -273,20 +241,16 @@
   <div id="sidebar">
     <header>
       <h1>목적지 목록</h1>
-      <div class="sub">target_dests.csv 기반 · 별표를 눌러 즐겨찾기에 추가하세요</div>
+      <div class="sub">체크된 항목만 지도에 표시됩니다</div>
     </header>
 
     <div id="controls">
-      <div class="toggle-row">
-        <span>즐겨찾기만 보기</span>
-        <label class="switch">
-          <input type="checkbox" id="favOnlyToggle">
-          <span class="slider"></span>
-        </label>
+      <div class="file-row">
+        <button id="selectAllBtn">전체 선택</button>
+        <button id="deselectAllBtn">전체 해제</button>
       </div>
       <div class="file-row">
-        <button id="exportBtn">즐겨찾기 CSV 내보내기</button>
-        <button id="importBtn">즐겨찾기 CSV 불러오기</button>
+        <button id="importBtn" class="primary">CSV 불러오기</button>
         <input type="file" id="importInput" accept=".csv">
       </div>
     </div>
@@ -310,23 +274,21 @@
 </div>
 
 <!-- 카카오맵 JS SDK: 실제 사용 시 아래 YOUR_KAKAO_JS_KEY 를 발급받은 키로 교체하세요 -->
-<!-- autoload=false 로 두고, 아래 스크립트에서 직접 로드 성공/실패를 확인한 뒤 초기화합니다 &autoload=false-->
+<!-- autoload=false 로 두고, 아래 스크립트에서 직접 로드 성공/실패를 확인한 뒤 초기화합니다 -->
 <script id="kakao-sdk"
-  src="https://dapi.kakao.com/v2/maps/sdk.js?appkey=40614573984d36782fbe01f8ede47650&libraries=services&clusterer,drawing">
+  src="https://dapi.kakao.com/v2/maps/sdk.js?appkey=40614573984d36782fbe01f8ede47650&libraries=services&autoload=false">
 </script>
 <script>
 (function () {
-  const FAV_STORAGE_KEY = "favorite_targets_v1";
   const CSV_PATH = "target_dests.csv";
   const SDK_LOAD_TIMEOUT_MS = 5000;
   const TILE_LOAD_TIMEOUT_MS = 6000;
 
-  let destinations = [];   // { target_name, target_addr, lat, lng, geocodeFailed, marker }
-  let favorites = new Set(); // target_name 기준
-  let favOnly = false;
+  let destinations = [];   // { target_name, target_addr, lat, lng, checked, geocodeFailed, geocodeError, marker }
   let activeIndex = null;
   let map, geocoder;
   let sdkReady = false;
+  let geocodeCheckDone = false;
 
   const statusEl = document.getElementById("status");
   const listEl = document.getElementById("list");
@@ -378,75 +340,16 @@
     location.reload();
   });
 
-  // ---------- 즐겨찾기 (localStorage) ----------
-  function loadFavorites() {
-    try {
-      const raw = localStorage.getItem(FAV_STORAGE_KEY);
-      if (raw) favorites = new Set(JSON.parse(raw));
-    } catch (e) {
-      favorites = new Set();
-      showBanner("즐겨찾기를 불러오지 못했습니다", "저장된 즐겨찾기 데이터가 손상되어 초기화되었습니다.", "warning");
-    }
-  }
-
-  function saveFavorites() {
-    try {
-      localStorage.setItem(FAV_STORAGE_KEY, JSON.stringify([...favorites]));
-    } catch (e) {
-      showBanner("즐겨찾기를 저장하지 못했습니다", "브라우저 저장 공간을 사용할 수 없습니다. 시크릿 모드이거나 저장 공간이 가득 찼을 수 있습니다.", "error");
-    }
-  }
-
-  function toggleFavorite(name) {
-    if (favorites.has(name)) favorites.delete(name);
-    else favorites.add(name);
-    saveFavorites();
-    renderList();
-  }
-
   // ---------- CSV 유틸 ----------
-  function parseCSV(text) {
+  // 헤더 이름은 무엇이든 상관없이, 첫 줄은 헤더로 간주해 건너뛰고
+  // 각 데이터 행의 첫 번째/두 번째 열을 이름/주소로 사용합니다.
+  function parseCSVRows(text) {
     const lines = text.replace(/\r/g, "").split("\n").filter(l => l.trim().length > 0);
-    if (lines.length === 0) return [];
-    const header = lines[0].split(",").map(h => h.trim());
-    const rows = [];
-    for (let i = 1; i < lines.length; i++) {
-      const cols = lines[i].split(",").map(c => c.trim());
-      const row = {};
-      header.forEach((h, idx) => { row[h] = cols[idx] !== undefined ? cols[idx] : ""; });
-      rows.push(row);
-    }
-    return rows;
-  }
-
-  function toCSV(rows) {
-    const header = "target_name,target_addr";
-    const lines = rows.map(r => `${csvEscape(r.target_name)},${csvEscape(r.target_addr)}`);
-    return [header, ...lines].join("\n");
-  }
-
-  function csvEscape(val) {
-    val = val == null ? "" : String(val);
-    if (val.includes(",") || val.includes('"') || val.includes("\n")) {
-      return '"' + val.replace(/"/g, '""') + '"';
-    }
-    return val;
-  }
-
-  function downloadCSV(filename, text) {
-    const blob = new Blob(["\uFEFF" + text], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    if (lines.length <= 1) return [];
+    return lines.slice(1).map(line => line.split(",").map(c => c.trim()));
   }
 
   // ---------- 카카오 SDK 로드 확인 ----------
-  // 스크립트 네트워크 요청 자체가 실패한 경우 (파일 없음, 네트워크 차단 등)
   document.getElementById("kakao-sdk").addEventListener("error", function () {
     showFatalError(
       "카카오맵 스크립트를 불러오지 못했습니다",
@@ -459,8 +362,6 @@
     );
   });
 
-  // appkey가 잘못되었거나 도메인이 등록되지 않은 경우, 서버가 에러 응답을 돌려주고
-  // 그 내용이 유효하지 않은 JS로 실행되면서 SyntaxError 형태로 나타나는 경우가 있습니다.
   window.addEventListener("error", function (e) {
     if (e && e.filename && e.filename.indexOf("dapi.kakao.com") !== -1) {
       showFatalError(
@@ -476,7 +377,6 @@
   });
 
   function waitForSdkThenInit() {
-    // autoload=false 이므로 kakao.maps.load 콜백이 실제 로드 성공 시점입니다.
     const timeoutId = setTimeout(function () {
       if (!sdkReady) {
         showFatalError(
@@ -492,7 +392,6 @@
     }, SDK_LOAD_TIMEOUT_MS);
 
     if (typeof kakao === "undefined" || !kakao.maps) {
-      // error 이벤트가 아직 안 잡혔더라도 여기서 한 번 더 안전하게 체크
       return;
     }
 
@@ -502,7 +401,7 @@
         sdkReady = true;
         hideFatalError();
         initMap();
-        loadDestinations();
+        loadInitialCsvIfPresent();
       });
     } catch (err) {
       clearTimeout(timeoutId);
@@ -545,6 +444,38 @@
     }
   }
 
+  function clearAllMarkers() {
+    destinations.forEach(d => {
+      if (d.marker) d.marker.setMap(null);
+    });
+  }
+
+  function setDestinations(rows) {
+    clearAllMarkers();
+    destinations = rows
+      .filter(cols => cols.length >= 2 && cols[0] && cols[1])
+      .map(cols => ({
+        target_name: cols[0],
+        target_addr: cols[1],
+        checked: true,
+        geocodeFailed: false
+      }));
+    activeIndex = null;
+    geocodeCheckDone = false;
+    renderList();
+
+    if (destinations.length === 0) {
+      setStatus("표시할 목적지가 없습니다.");
+      return;
+    }
+
+    setStatus(`총 ${destinations.length}곳 · 좌표 변환 중...`);
+    destinations.forEach((dest, idx) => geocodeAndPlace(dest, idx));
+    setTimeout(() => {
+      setStatus(`총 ${destinations.length}곳`);
+    }, 800);
+  }
+
   function geocodeAndPlace(dest, index) {
     if (!geocoder) return;
     try {
@@ -554,7 +485,11 @@
           dest.lat = result[0].y;
           dest.lng = result[0].x;
 
-          const marker = new kakao.maps.Marker({ map, position: coords, title: dest.target_name });
+          const marker = new kakao.maps.Marker({
+            map: dest.checked ? map : null,
+            position: coords,
+            title: dest.target_name
+          });
           dest.marker = marker;
 
           const iw = new kakao.maps.InfoWindow({
@@ -565,7 +500,7 @@
             focusItem(index);
           });
 
-          fitBoundsToVisible();
+          fitBoundsToChecked();
         } else if (status === kakao.maps.services.Status.ZERO_RESULT) {
           dest.geocodeFailed = true;
           dest.geocodeError = "주소를 찾을 수 없습니다";
@@ -583,7 +518,6 @@
     }
   }
 
-  let geocodeCheckDone = false;
   function checkAllGeocodingFailed() {
     if (geocodeCheckDone) return;
     const finished = destinations.filter(d => d.marker || d.geocodeFailed);
@@ -593,14 +527,14 @@
     if (allFailed) {
       showBanner(
         "모든 주소 변환에 실패했습니다",
-        "카카오 개발자 콘솔에서 '로컬' 서비스(주소 검색)가 활성화되어 있는지, 또는 target_dests.csv의 주소 형식이 올바른지 확인해주세요.",
+        "카카오 개발자 콘솔에서 '로컬' 서비스(주소 검색)가 활성화되어 있는지, 또는 CSV의 주소 형식이 올바른지 확인해주세요.",
         "error"
       );
     }
   }
 
-  function fitBoundsToVisible() {
-    const visible = getVisibleDestinations().filter(d => d.marker);
+  function fitBoundsToChecked() {
+    const visible = destinations.filter(d => d.checked && d.marker);
     if (visible.length === 0) return;
     const bounds = new kakao.maps.LatLngBounds();
     visible.forEach(d => bounds.extend(new kakao.maps.LatLng(d.lat, d.lng)));
@@ -610,10 +544,9 @@
   function updateMarkerVisibility() {
     destinations.forEach(d => {
       if (!d.marker) return;
-      const shouldShow = !favOnly || favorites.has(d.target_name);
-      d.marker.setMap(shouldShow ? map : null);
+      d.marker.setMap(d.checked ? map : null);
     });
-    fitBoundsToVisible();
+    fitBoundsToChecked();
   }
 
   function focusItem(index) {
@@ -632,37 +565,28 @@
   }
 
   // ---------- 목록 렌더링 ----------
-  function getVisibleDestinations() {
-    return destinations.filter(d => !favOnly || favorites.has(d.target_name));
-  }
-
   function renderList() {
-    const visible = getVisibleDestinations();
     listEl.innerHTML = "";
 
-    if (visible.length === 0) {
+    if (destinations.length === 0) {
       const empty = document.createElement("div");
       empty.id = "empty";
-      empty.textContent = favOnly
-        ? "즐겨찾기한 장소가 없습니다. 별표를 눌러 추가해보세요."
-        : "표시할 장소가 없습니다.";
+      empty.textContent = "표시할 장소가 없습니다. CSV 불러오기로 목적지 목록을 추가해보세요.";
       listEl.appendChild(empty);
       return;
     }
 
-    visible.forEach((dest) => {
-      const realIndex = destinations.indexOf(dest);
-      const isFav = favorites.has(dest.target_name);
-
+    destinations.forEach((dest, realIndex) => {
       const item = document.createElement("div");
       item.className = "item" + (realIndex === activeIndex ? " active" : "");
 
-      const star = document.createElement("div");
-      star.className = "star" + (isFav ? " on" : "");
-      star.textContent = isFav ? "★" : "☆";
-      star.addEventListener("click", (e) => {
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.checked = dest.checked;
+      checkbox.addEventListener("click", (e) => {
         e.stopPropagation();
-        toggleFavorite(dest.target_name);
+        dest.checked = checkbox.checked;
+        updateMarkerVisibility();
       });
 
       const text = document.createElement("div");
@@ -683,7 +607,7 @@
         text.appendChild(fail);
       }
 
-      item.appendChild(star);
+      item.appendChild(checkbox);
       item.appendChild(text);
       item.addEventListener("click", () => focusItem(realIndex));
 
@@ -691,63 +615,48 @@
     });
   }
 
-  // ---------- CSV 데이터 로드 ----------
-  function loadDestinations() {
-    setStatus("target_dests.csv 불러오는 중...");
+  // ---------- CSV 로드 (최초 자동 로드 + 수동 불러오기 공용) ----------
+  function loadInitialCsvIfPresent() {
+    setStatus("target_dests.csv 확인 중...");
     fetch(CSV_PATH)
       .then(res => {
-        if (!res.ok) throw new Error(`파일을 찾을 수 없습니다 (HTTP ${res.status})`);
+        if (res.status === 404) return null; // 파일이 없으면 지도만 표시 (정상 상태)
+        if (!res.ok) throw new Error(`파일을 불러오는 중 오류가 발생했습니다 (HTTP ${res.status})`);
         return res.text();
       })
       .then(text => {
-        const rows = parseCSV(text);
-        destinations = rows
-          .filter(r => r.target_name && r.target_addr)
-          .map(r => ({ target_name: r.target_name, target_addr: r.target_addr, geocodeFailed: false }));
-
-        if (destinations.length === 0) {
-          setStatus("target_dests.csv 에 유효한 데이터가 없습니다.");
-          showBanner(
-            "표시할 데이터가 없습니다",
-            "target_dests.csv 파일에 target_name, target_addr 헤더와 데이터가 올바르게 들어있는지 확인해주세요.",
-            "warning"
-          );
+        if (text === null) {
+          setStatus("target_dests.csv 없음 · 지도만 표시합니다");
           renderList();
           return;
         }
-
-        setStatus(`총 ${destinations.length}곳 · 좌표 변환 중...`);
-        renderList();
-        destinations.forEach((dest, idx) => geocodeAndPlace(dest, idx));
-        setTimeout(() => {
-          setStatus(`총 ${destinations.length}곳`);
-        }, 800);
+        setDestinations(parseCSVRows(text));
       })
       .catch(err => {
-        setStatus("target_dests.csv 를 불러오지 못했습니다.");
+        setStatus("target_dests.csv를 불러오지 못했습니다");
         showBanner(
           "target_dests.csv를 불러오지 못했습니다",
-          `${err.message}. index.html과 같은 폴더에 파일이 있는지, 로컬 서버로 열었는지(파일을 직접 더블클릭해서 열면 안 됨) 확인해주세요.`,
+          `${err.message}. 로컬 서버로 열었는지(파일을 직접 더블클릭해서 열면 fetch가 차단됩니다) 확인해주세요.`,
           "error"
         );
+        renderList();
       });
   }
 
   // ---------- 이벤트 바인딩 ----------
   function bindControls() {
-    document.getElementById("favOnlyToggle").addEventListener("change", (e) => {
-      favOnly = e.target.checked;
+    document.getElementById("selectAllBtn").addEventListener("click", () => {
+      if (destinations.length === 0) return;
+      destinations.forEach(d => d.checked = true);
       renderList();
       updateMarkerVisibility();
     });
 
-    document.getElementById("exportBtn").addEventListener("click", () => {
-      const favRows = destinations.filter(d => favorites.has(d.target_name));
-      if (favRows.length === 0) {
-        showBanner("내보낼 즐겨찾기가 없습니다", "별표를 눌러 즐겨찾기를 먼저 추가해주세요.", "warning");
-        return;
-      }
-      downloadCSV("favorate_targets.csv", toCSV(favRows));
+    document.getElementById("deselectAllBtn").addEventListener("click", () => {
+      if (destinations.length === 0) return;
+      destinations.forEach(d => d.checked = false);
+      renderList();
+      updateMarkerVisibility();
     });
 
     document.getElementById("importBtn").addEventListener("click", () => {
@@ -760,22 +669,12 @@
       const reader = new FileReader();
       reader.onload = (evt) => {
         try {
-          const rows = parseCSV(evt.target.result);
-          let added = 0;
-          rows.forEach(r => {
-            if (r.target_name) {
-              favorites.add(r.target_name);
-              added++;
-            }
-          });
-          if (added === 0) {
-            showBanner("불러온 항목이 없습니다", "CSV 파일의 헤더가 target_name, target_addr 형식인지 확인해주세요.", "warning");
-          } else {
-            saveFavorites();
-            renderList();
-            updateMarkerVisibility();
-            setStatus(`즐겨찾기 ${added}건 불러옴`);
+          const rows = parseCSVRows(evt.target.result);
+          if (rows.length === 0) {
+            showBanner("불러온 항목이 없습니다", "CSV 파일에 헤더 다음으로 최소 한 줄 이상의 데이터가 필요합니다.", "warning");
+            return;
           }
+          setDestinations(rows);
         } catch (err) {
           showBanner("CSV 파일을 읽지 못했습니다", String(err && err.message ? err.message : err), "error");
         }
@@ -789,7 +688,6 @@
   }
 
   // ---------- 초기화 ----------
-  loadFavorites();
   bindControls();
   waitForSdkThenInit();
 })();
