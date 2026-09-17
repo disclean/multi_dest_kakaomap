@@ -28,15 +28,25 @@
   #app {
     display: flex;
     height: 100vh;
+    overflow: hidden;
   }
   #sidebar {
     width: 360px;
-    min-width: 300px;
+    min-width: 360px;
     background: var(--panel);
     border-right: 1px solid var(--line);
     display: flex;
     flex-direction: column;
+    overflow: hidden;
+    transition: width 0.2s ease, min-width 0.2s ease, border-color 0.2s ease;
   }
+  #sidebar.collapsed {
+    width: 0;
+    min-width: 0;
+    border-right-color: transparent;
+  }
+  #sidebar > * { width: 360px; } /* 접힐 때 내부 콘텐츠가 찌그러지지 않도록 고정 폭 유지 */
+
   #sidebar header {
     padding: 20px 20px 16px;
     border-bottom: 1px solid var(--line);
@@ -60,7 +70,12 @@
     gap: 8px;
   }
   .file-row { display: flex; gap: 8px; }
-  button {
+  .control-label {
+    font-size: 11.5px;
+    color: var(--muted);
+    margin-top: 4px;
+  }
+  button, select {
     font-family: inherit;
     font-size: 12.5px;
     padding: 8px 12px;
@@ -69,8 +84,9 @@
     background: var(--panel);
     color: var(--ink);
     cursor: pointer;
-    flex: 1;
   }
+  button { flex: 1; }
+  select { width: 100%; }
   button:hover { background: var(--accent-soft); border-color: var(--accent); }
   button.primary {
     background: var(--accent);
@@ -130,6 +146,7 @@
   #map-wrap {
     flex: 1;
     position: relative;
+    min-width: 0;
   }
   #map {
     width: 100%;
@@ -144,11 +161,33 @@
     line-height: 1.6;
   }
 
+  /* ---------- 사이드바 접기/펼치기 버튼 ---------- */
+  #sidebarToggle {
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    z-index: 70;
+    width: 34px;
+    height: 34px;
+    padding: 0;
+    flex: none;
+    border-radius: 8px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    font-size: 15px;
+    line-height: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+  }
+  #sidebarToggle:hover { background: var(--accent-soft); border-color: var(--accent); }
+
   /* ---------- 오류 안내 배너 (지도 위 상단) ---------- */
   #bannerStack {
     position: absolute;
     top: 12px;
-    left: 12px;
+    left: 56px;
     right: 12px;
     z-index: 50;
     display: flex;
@@ -249,10 +288,19 @@
         <button id="selectAllBtn">전체 선택</button>
         <button id="deselectAllBtn">전체 해제</button>
       </div>
+
       <div class="file-row">
-        <button id="importBtn" class="primary">CSV 불러오기</button>
+        <button id="importBtn" class="primary">내 컴퓨터에서 CSV 선택</button>
         <input type="file" id="importInput" accept=".csv">
       </div>
+
+      <div class="file-row">
+        <select id="serverCsvSelect" style="flex:1;">
+          <option value="">서버 CSV 목록에서 선택...</option>
+        </select>
+        <button id="refreshServerCsvBtn" style="flex:none; width:auto;" title="서버 CSV 목록 새로고침">⟳</button>
+      </div>
+      <div class="control-label" id="serverCsvNote"></div>
     </div>
 
     <div id="status"></div>
@@ -260,6 +308,7 @@
   </div>
 
   <div id="map-wrap">
+    <button id="sidebarToggle" title="사이드바 접기/펼치기">☰</button>
     <div id="bannerStack"></div>
     <div id="fatalOverlay">
       <div class="box">
@@ -273,14 +322,13 @@
   </div>
 </div>
 
-<!-- 카카오맵 JS SDK: 실제 사용 시 아래 YOUR_KAKAO_JS_KEY 를 발급받은 키로 교체하세요 -->
-<!-- autoload=false 로 두고, 아래 스크립트에서 직접 로드 성공/실패를 확인한 뒤 초기화합니다 -->
-<script id="kakao-sdk"
-  src="https://dapi.kakao.com/v2/maps/sdk.js?appkey=40614573984d36782fbe01f8ede47650&libraries=services&autoload=false">
-</script>
+<!-- 카카오 API 키는 index.html과 분리된 config.js에 KAKAO_APP_KEY 변수로 저장합니다. -->
+<script src="config.js"></script>
 <script>
 (function () {
   const CSV_PATH = "target_dests.csv";
+  const SERVER_CSV_DIR = "csv/";
+  const SERVER_CSV_MANIFEST = "csv/files.json";
   const SDK_LOAD_TIMEOUT_MS = 5000;
   const TILE_LOAD_TIMEOUT_MS = 6000;
 
@@ -289,6 +337,7 @@
   let map, geocoder;
   let sdkReady = false;
   let geocodeCheckDone = false;
+  let sdkTimeoutId = null;
 
   const statusEl = document.getElementById("status");
   const listEl = document.getElementById("list");
@@ -297,6 +346,10 @@
   const fatalTitle = document.getElementById("fatalTitle");
   const fatalMessage = document.getElementById("fatalMessage");
   const fatalReasons = document.getElementById("fatalReasons");
+  const sidebar = document.getElementById("sidebar");
+  const sidebarToggle = document.getElementById("sidebarToggle");
+  const serverCsvSelect = document.getElementById("serverCsvSelect");
+  const serverCsvNote = document.getElementById("serverCsvNote");
 
   function setStatus(msg) {
     statusEl.textContent = msg;
@@ -340,6 +393,18 @@
     location.reload();
   });
 
+  // ---------- 사이드바 접기/펼치기 ----------
+  sidebarToggle.addEventListener("click", () => {
+    sidebar.classList.toggle("collapsed");
+    // 카카오맵은 컨테이너 크기가 바뀌면 relayout을 직접 호출해줘야 타일이 올바르게 다시 그려집니다.
+    setTimeout(() => {
+      if (map) {
+        map.relayout();
+        fitBoundsToChecked();
+      }
+    }, 220);
+  });
+
   // ---------- CSV 유틸 ----------
   // 헤더 이름은 무엇이든 상관없이, 첫 줄은 헤더로 간주해 건너뛰고
   // 각 데이터 행의 첫 번째/두 번째 열을 이름/주소로 사용합니다.
@@ -349,26 +414,15 @@
     return lines.slice(1).map(line => line.split(",").map(c => c.trim()));
   }
 
-  // ---------- 카카오 SDK 로드 확인 ----------
-  document.getElementById("kakao-sdk").addEventListener("error", function () {
-    showFatalError(
-      "카카오맵 스크립트를 불러오지 못했습니다",
-      "SDK 스크립트 요청이 실패했습니다. 네트워크 연결 또는 아래 항목을 확인해주세요.",
-      [
-        "인터넷 연결 상태",
-        "스크립트 태그의 도메인(dapi.kakao.com) 접근 가능 여부",
-        "사내망/방화벽에서 해당 도메인을 차단하고 있는지 여부"
-      ]
-    );
-  });
-
+  // ---------- 카카오 SDK 로드 (KAKAO_APP_KEY 변수를 사용해 동적으로 스크립트 태그 생성) ----------
   window.addEventListener("error", function (e) {
     if (e && e.filename && e.filename.indexOf("dapi.kakao.com") !== -1) {
+      clearTimeout(sdkTimeoutId);
       showFatalError(
         "카카오맵 인증에 실패했습니다",
         "SDK 로드 중 오류가 발생했습니다. 대부분 키 또는 도메인 설정 문제입니다.",
         [
-          "index.html의 YOUR_KAKAO_JS_KEY 가 실제 발급받은 키로 교체되었는지 확인",
+          "config.js의 KAKAO_APP_KEY 값이 실제 발급받은 키로 교체되었는지 확인",
           "카카오 개발자 콘솔 > 플랫폼 > Web 에 현재 접속 주소(예: http://localhost:5500)가 등록되어 있는지 확인",
           "file:// 로 직접 열지 않았는지 확인 (반드시 http:// 로 접속해야 함)"
         ]
@@ -376,14 +430,26 @@
     }
   });
 
-  function waitForSdkThenInit() {
-    const timeoutId = setTimeout(function () {
+  function loadKakaoSdk() {
+    if (typeof KAKAO_APP_KEY === "undefined" || !KAKAO_APP_KEY || KAKAO_APP_KEY === "YOUR_KAKAO_JS_KEY") {
+      showFatalError(
+        "카카오 API 키가 설정되지 않았습니다",
+        "config.js 파일의 KAKAO_APP_KEY 값을 발급받은 키로 교체해주세요.",
+        [
+          "index.html과 같은 폴더에 config.js 파일이 있는지 확인",
+          "config.js 안의 KAKAO_APP_KEY = \"...\" 값이 실제 키로 채워져 있는지 확인"
+        ]
+      );
+      return;
+    }
+
+    sdkTimeoutId = setTimeout(function () {
       if (!sdkReady) {
         showFatalError(
           "카카오맵을 불러오는 데 실패했습니다",
           `${SDK_LOAD_TIMEOUT_MS / 1000}초 안에 지도 SDK가 준비되지 않았습니다.`,
           [
-            "YOUR_KAKAO_JS_KEY 가 실제 키로 교체되었는지 확인",
+            "config.js의 KAKAO_APP_KEY 값이 실제 키로 교체되었는지 확인",
             "카카오 개발자 콘솔에 현재 도메인이 등록되어 있는지 확인",
             "브라우저 개발자 도구(F12) > Network 탭에서 sdk.js 요청 상태 코드 확인 (401/403이면 키·도메인 문제)"
           ]
@@ -391,20 +457,47 @@
       }
     }, SDK_LOAD_TIMEOUT_MS);
 
+    const script = document.createElement("script");
+    script.id = "kakao-sdk";
+    script.src = `https://dapi.kakao.com/v2/maps/sdk.js?appkey=${encodeURIComponent(KAKAO_APP_KEY)}&libraries=services&autoload=false`;
+
+    script.addEventListener("error", function () {
+      clearTimeout(sdkTimeoutId);
+      showFatalError(
+        "카카오맵 스크립트를 불러오지 못했습니다",
+        "SDK 스크립트 요청이 실패했습니다. 네트워크 연결 또는 아래 항목을 확인해주세요.",
+        [
+          "인터넷 연결 상태",
+          "스크립트 태그의 도메인(dapi.kakao.com) 접근 가능 여부",
+          "사내망/방화벽에서 해당 도메인을 차단하고 있는지 여부"
+        ]
+      );
+    });
+
+    script.addEventListener("load", function () {
+      initAfterSdkLoaded();
+    });
+
+    document.head.appendChild(script);
+  }
+
+  function initAfterSdkLoaded() {
     if (typeof kakao === "undefined" || !kakao.maps) {
+      // 인증 실패로 스크립트 내용이 깨진 경우는 위 window error 리스너가 처리합니다.
       return;
     }
 
     try {
       kakao.maps.load(function () {
-        clearTimeout(timeoutId);
+        clearTimeout(sdkTimeoutId);
         sdkReady = true;
         hideFatalError();
         initMap();
         loadInitialCsvIfPresent();
+        loadServerCsvList();
       });
     } catch (err) {
-      clearTimeout(timeoutId);
+      clearTimeout(sdkTimeoutId);
       showFatalError(
         "카카오맵 초기화 중 오류가 발생했습니다",
         String(err && err.message ? err.message : err),
@@ -534,6 +627,7 @@
   }
 
   function fitBoundsToChecked() {
+    if (!map) return;
     const visible = destinations.filter(d => d.checked && d.marker);
     if (visible.length === 0) return;
     const bounds = new kakao.maps.LatLngBounds();
@@ -571,7 +665,7 @@
     if (destinations.length === 0) {
       const empty = document.createElement("div");
       empty.id = "empty";
-      empty.textContent = "표시할 장소가 없습니다. CSV 불러오기로 목적지 목록을 추가해보세요.";
+      empty.textContent = "표시할 장소가 없습니다. CSV를 불러와보세요.";
       listEl.appendChild(empty);
       return;
     }
@@ -615,7 +709,7 @@
     });
   }
 
-  // ---------- CSV 로드 (최초 자동 로드 + 수동 불러오기 공용) ----------
+  // ---------- CSV 로드: 루트의 target_dests.csv 자동 로드 ----------
   function loadInitialCsvIfPresent() {
     setStatus("target_dests.csv 확인 중...");
     fetch(CSV_PATH)
@@ -640,6 +734,102 @@
           "error"
         );
         renderList();
+      });
+  }
+
+  // ---------- CSV 로드: 서버 csv/ 폴더 목록 ----------
+  // 정적 호스팅(GitHub Pages 등)은 디렉터리 목록을 직접 제공하지 않으므로,
+  // csv/files.json 에 파일명 배열을 적어두면 그 목록을 읽어와 표시합니다.
+  // 예) ["target_dests.csv", "seoul_forests.csv"]
+  function loadServerCsvList(isManualRefresh) {
+    const previousValue = serverCsvSelect.value;
+    // 캐시된 옛 목록이 표시되지 않도록 매번 새 URL로 요청하고, 캐시를 아예 참조하지 않습니다.
+    const cacheBustedUrl = SERVER_CSV_MANIFEST + "?t=" + Date.now();
+
+    fetch(cacheBustedUrl, { cache: "no-store" })
+      .then(res => {
+        if (res.status === 404) {
+          return { notFound: true };
+        }
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`);
+        }
+        return res.json();
+      })
+      .then(files => {
+        if (files && files.notFound) {
+          if (isManualRefresh) {
+            showBanner(
+              "csv/files.json을 찾을 수 없습니다",
+              "경로와 파일명을 확인해주세요 (index.html 기준 상대경로 csv/files.json).",
+              "warning"
+            );
+          }
+          return;
+        }
+
+        if (!Array.isArray(files)) {
+          if (isManualRefresh) {
+            showBanner(
+              "csv/files.json 형식이 올바르지 않습니다",
+              '["파일명1.csv", "파일명2.csv"] 형태의 배열이어야 합니다.',
+              "warning"
+            );
+          }
+          return;
+        }
+
+        // 플레이스홀더만 남기고 기존 목록 초기화
+        serverCsvSelect.innerHTML = '<option value="">서버 CSV 목록에서 선택...</option>';
+        files.forEach(name => {
+          const opt = document.createElement("option");
+          opt.value = name;
+          opt.textContent = name;
+          serverCsvSelect.appendChild(opt);
+        });
+
+        // 새로고침 전에 선택돼 있던 파일이 목록에 여전히 있으면 선택 상태 유지
+        if (previousValue && files.includes(previousValue)) {
+          serverCsvSelect.value = previousValue;
+        }
+        serverCsvNote.textContent = "";
+        if (isManualRefresh) {
+          setStatus(`서버 CSV 목록 갱신됨 · ${files.length}건`);
+        }
+      })
+      .catch(err => {
+        if (isManualRefresh) {
+          showBanner(
+            "csv/files.json을 불러오지 못했습니다",
+            String(err && err.message ? err.message : err),
+            "error"
+          );
+        }
+        // 최초 자동 로드 시에는 매니페스트가 없는 게 정상적인 상황일 수 있으므로 조용히 무시합니다.
+      });
+  }
+
+  function loadServerCsvFile(filename) {
+    setStatus(`${filename} 불러오는 중...`);
+    fetch(SERVER_CSV_DIR + filename)
+      .then(res => {
+        if (!res.ok) throw new Error(`파일을 불러오지 못했습니다 (HTTP ${res.status})`);
+        return res.text();
+      })
+      .then(text => {
+        const rows = parseCSVRows(text);
+        if (rows.length === 0) {
+          showBanner("불러온 항목이 없습니다", `${filename} 파일에 데이터 행이 없습니다.`, "warning");
+          return;
+        }
+        setDestinations(rows);
+      })
+      .catch(err => {
+        showBanner(
+          "서버 CSV를 불러오지 못했습니다",
+          `${filename}: ${err.message}`,
+          "error"
+        );
       });
   }
 
@@ -674,6 +864,7 @@
             showBanner("불러온 항목이 없습니다", "CSV 파일에 헤더 다음으로 최소 한 줄 이상의 데이터가 필요합니다.", "warning");
             return;
           }
+          serverCsvSelect.value = ""; // 로컬 파일 로드 시 서버 목록 선택은 초기화
           setDestinations(rows);
         } catch (err) {
           showBanner("CSV 파일을 읽지 못했습니다", String(err && err.message ? err.message : err), "error");
@@ -685,11 +876,21 @@
       reader.readAsText(file, "UTF-8");
       e.target.value = "";
     });
+
+    serverCsvSelect.addEventListener("change", (e) => {
+      const filename = e.target.value;
+      if (!filename) return;
+      loadServerCsvFile(filename);
+    });
+
+    document.getElementById("refreshServerCsvBtn").addEventListener("click", () => {
+      loadServerCsvList(true);
+    });
   }
 
   // ---------- 초기화 ----------
   bindControls();
-  waitForSdkThenInit();
+  loadKakaoSdk();
 })();
 </script>
 </body>
